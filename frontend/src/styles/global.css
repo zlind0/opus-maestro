@@ -1,0 +1,340 @@
+/* ── Classical Music Player — iOS 5 Skeuomorphic Theme ── */
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Playfair+Display:wght@400;600;700&display=swap');
+
+:root {
+  /* Wood / leather palette */
+  --bg-dark: #1a0f0a;
+  --bg-wood: #3e2723;
+  --bg-wood-light: #5d4037;
+  --bg-leather: #4e342e;
+  --bg-panel: #2c1810;
+  --bg-inset: #1c0e08;
+  --border-groove: #5a3a2a;
+  --border-ridge: #7d5a48;
+  --text-primary: #f5e6d3;
+  --text-secondary: #c4a882;
+  --text-muted: #8d7b6a;
+  --accent-gold: #c9a96e;
+  --accent-warm: #d4a574;
+  --metal-dark: #2a2a2a;
+  --metal-mid: #4a4a4a;
+  --metal-light: #6a6a6a;
+  --metal-shine: #8a8a8a;
+
+  --font-serif: 'Noto Serif SC', 'Playfair Display', Georgia, serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+
+  /* Shadows for depth */
+  --shadow-inset: inset 0 2px 6px rgba(0,0,0,0.5);
+  --shadow-raised: 0 2px 8px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-button: 0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-serif);
+  background: var(--bg-dark);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+#classical-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(180deg, rgba(62,39,35,0.95) 0%, rgba(26,15,10,0.98) 100%),
+    url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%235d4037' fill-opacity='0.08'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-panel); }
+::-webkit-scrollbar-thumb { background: var(--border-groove); border-radius: 3px; }
+
+/* ── Typography ── */
+h1 { font-size: 1.75rem; font-weight: 700; color: var(--accent-gold); letter-spacing: 0.02em; }
+h2 { font-size: 1.35rem; font-weight: 600; color: var(--text-primary); }
+h3 { font-size: 1.1rem; font-weight: 600; color: var(--text-secondary); }
+
+/* ── Skeuomorphic Panels ── */
+.skeuo-panel {
+  background: linear-gradient(180deg, var(--bg-wood) 0%, var(--bg-wood-light) 2%, var(--bg-wood) 4%, var(--bg-panel) 100%);
+  border: 1px solid var(--border-groove);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-raised), inset 0 1px 0 rgba(255,255,255,0.05);
+  padding: 1rem;
+}
+
+.skeuo-inset {
+  background: var(--bg-inset);
+  border: 1px solid rgba(0,0,0,0.3);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-inset);
+  padding: 0.75rem;
+}
+
+/* ── Leather stitching effect (top bar) ── */
+.leather-bar {
+  background: linear-gradient(180deg, #5d4037 0%, #4e342e 50%, #3e2723 100%);
+  border-bottom: 2px solid var(--border-groove);
+  position: relative;
+  padding: 0.75rem 1rem;
+}
+.leather-bar::after {
+  content: '';
+  position: absolute;
+  bottom: 4px;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: repeating-linear-gradient(90deg, transparent, transparent 4px, var(--accent-warm) 4px, var(--accent-warm) 6px);
+  opacity: 0.3;
+}
+
+/* ── Metal Buttons (play controls) ── */
+.btn-metal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: linear-gradient(180deg, var(--metal-light) 0%, var(--metal-dark) 100%);
+  box-shadow: var(--shadow-button), 0 0 0 1px rgba(0,0,0,0.3);
+  color: var(--text-primary);
+  transition: all 0.1s ease;
+}
+.btn-metal:active {
+  transform: scale(0.95);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.4);
+}
+.btn-metal.large { width: 56px; height: 56px; font-size: 1.5rem; }
+.btn-metal.medium { width: 42px; height: 42px; font-size: 1.1rem; }
+.btn-metal.small { width: 34px; height: 34px; font-size: 0.9rem; }
+
+/* ── Wooden Buttons (navigation) ── */
+.btn-wood {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  border: 1px solid var(--border-groove);
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: linear-gradient(180deg, var(--bg-wood-light) 0%, var(--bg-wood) 100%);
+  box-shadow: var(--shadow-button);
+  color: var(--text-primary);
+  font-family: var(--font-serif);
+  font-size: 0.9rem;
+  transition: all 0.15s ease;
+}
+.btn-wood:hover {
+  background: linear-gradient(180deg, var(--border-ridge) 0%, var(--bg-wood-light) 100%);
+}
+.btn-wood:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+}
+
+/* ── Gold accent button ── */
+.btn-gold {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.5rem;
+  border: 1px solid #a88540;
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: linear-gradient(180deg, var(--accent-gold) 0%, #a88540 100%);
+  box-shadow: var(--shadow-button);
+  color: var(--bg-dark);
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: all 0.15s ease;
+}
+.btn-gold:hover { filter: brightness(1.1); }
+.btn-gold:active { transform: translateY(1px); }
+
+/* ── Input fields ── */
+.skeuo-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-inset);
+  border: 1px solid rgba(0,0,0,0.3);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-inset);
+  color: var(--text-primary);
+  font-family: var(--font-serif);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.skeuo-input:focus {
+  border-color: var(--accent-gold);
+}
+.skeuo-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* ── Slider (progress bar / volume) ── */
+.skeuo-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--bg-inset);
+  border-radius: 3px;
+  box-shadow: var(--shadow-inset);
+  outline: none;
+  cursor: pointer;
+}
+.skeuo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, var(--metal-shine) 0%, var(--metal-mid) 100%);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  cursor: pointer;
+}
+.skeuo-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, var(--metal-shine) 0%, var(--metal-mid) 100%);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  cursor: pointer;
+  border: none;
+}
+
+/* ── Era badge ── */
+.era-badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--accent-gold);
+  border-radius: 2px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-gold);
+  background: rgba(201, 169, 110, 0.1);
+}
+
+/* ── Composer card ── */
+.composer-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: linear-gradient(135deg, rgba(93,64,55,0.4) 0%, rgba(62,39,35,0.6) 100%);
+  border: 1px solid var(--border-groove);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.composer-card:hover {
+  background: linear-gradient(135deg, rgba(93,64,55,0.6) 0%, rgba(62,39,35,0.8) 100%);
+  border-color: var(--accent-gold);
+  transform: translateY(-1px);
+}
+
+.composer-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--border-ridge);
+  background: var(--bg-panel);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  color: var(--accent-gold);
+  flex-shrink: 0;
+}
+
+/* ── Movement list item ── */
+.movement-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(90,58,42,0.3);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.movement-item:hover {
+  background: rgba(93,64,55,0.3);
+}
+.movement-item:last-child {
+  border-bottom: none;
+}
+.movement-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-groove);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  color: var(--accent-gold);
+  flex-shrink: 0;
+}
+.movement-info { flex: 1; }
+.movement-title { font-size: 0.95rem; color: var(--text-primary); }
+.movement-mood { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+/* ── Layout helpers ── */
+.page-container {
+  flex: 1;
+  padding: 1rem;
+  padding-bottom: 100px; /* space for player bar */
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.grid-era {
+  display: grid;
+  gap: 1.25rem;
+}
+.grid-composers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+/* ── Transitions ── */
+.fade-enter-active,
+.fade-leave-active { transition: opacity 0.25s ease; }
+.fade-enter-from,
+.fade-leave-to { opacity: 0; }
+
+/* ── Responsive ── */
+@media (max-width: 600px) {
+  .page-container { padding: 0.75rem; padding-bottom: 90px; }
+  h1 { font-size: 1.35rem; }
+  .grid-composers { grid-template-columns: 1fr; }
+}

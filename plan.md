@@ -288,6 +288,10 @@ GET /health
 → 503: { "status": "degraded", "issues": ["llm_timeout"] }
 ```
 
+### 8.4 前端调试建议
+
+为了方便调试，应当具备一种prod模式和一种dev模式。dev模式下，确保前端代码一保存，浏览器就能刷新。
+
 ---
 
 ## 9. 测试策略

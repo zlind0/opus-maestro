@@ -1,0 +1,49 @@
+services:
+  db:
+    image: pgvector/pgvector:pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-music}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-musicpass}
+      POSTGRES_DB: ${POSTGRES_DB:-music}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-music}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-music}:${POSTGRES_PASSWORD:-musicpass}@db:5432/${POSTGRES_DB:-music}
+      SECRET_KEY: ${SECRET_KEY:-change-me-to-a-random-string-at-least-32-chars}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      MUSIC_PATH: /music
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-zh-CN}
+    volumes:
+      - ${MUSIC_PATH:-./music}:/music:ro
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:
