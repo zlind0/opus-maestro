@@ -32,10 +32,13 @@
   "canonical_string": "Composer: Wolfgang Amadeus Mozart | Title: Symphony No. 40 in G minor | Catalog: K. 550 | Type: Symphony | Era: Classical"
 }
 ```
+注意，这一部分单独做成一个模块，并且加入测试功能，要求提供一个测试工具，针对某个文件，可以单独输出prompt，以方便调试检验。
 
 4、相似推荐。利用LLM在当前曲目播放完以后推荐下一曲。
 
 5、LLM调OpenAI Compatible的API。
+
+6、注意要支持多语言，第一次设定的语言就是所有字段的语言。默认是简体中文。
 
 ## 数据库（Postgres）
 
