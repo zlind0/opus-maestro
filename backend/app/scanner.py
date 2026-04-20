@@ -369,7 +369,8 @@ async def run_scan(scan_job_id: uuid.UUID):
             result = await db.execute(select(ScanJob).where(ScanJob.id == scan_job_id))
             job = result.scalar_one()
             job.status = "running"
-            job.started_at = datetime.now(timezone.utc)
+            # Use timezone-naive UTC datetimes to match DB columns (TIMESTAMP without time zone)
+            job.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await db.commit()
 
             music_path = settings.music_path
@@ -391,7 +392,8 @@ async def run_scan(scan_job_id: uuid.UUID):
 
             job.status = "completed"
             job.message = f"Scan complete: {len(files)} files processed"
-            job.completed_at = datetime.now(timezone.utc)
+            # Store naive UTC datetime for compatibility with DB TIMESTAMP columns
+            job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await db.commit()
 
         except Exception as e:
