@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 import httpx
+import shlex
 
 from app.config import get_settings
 
@@ -68,26 +69,59 @@ def build_extraction_prompt(file_path: str, tags: dict, language: str = "简体�
     return system, user
 
 
+def build_chat_completion_payload(
+    system_prompt: str, user_prompt: str, response_json: bool = True
+) -> dict:
+    """Build the chat completion payload for an OpenAI-compatible API."""
+    payload = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+    }
+    # if response_json:
+    #     payload["response_format"] = {"type": "json_object"}
+    if settings.llm_enable_think:
+        payload["think"] = True
+    return payload
+
+
+def _log_curl_request(method: str, url: str, headers: dict, payload: object) -> None:
+    """Log an HTTP request as a curl command for easy copy/paste debugging."""
+    try:
+        payload_str = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        payload_str = str(payload)
+
+    quoted_url = shlex.quote(url)
+    quoted_payload = shlex.quote(payload_str)
+
+    header_parts = []
+    for k, v in headers.items():
+        header_parts.append(f"-H {shlex.quote(f'{k}: {v}')}")
+
+    headers_str = "  ".join(header_parts) if header_parts else ""
+
+    curl_cmd = f"curl -X {method} {quoted_url}  {headers_str}  -d {quoted_payload}"
+
+    logger.info("LLM request as curl:\n%s", curl_cmd)
+
+
 async def call_llm(system_prompt: str, user_prompt: str, response_json: bool = True) -> Optional[str]:
     """Call OpenAI-compatible API."""
     try:
+        url = f"{settings.openai_api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = build_chat_completion_payload(system_prompt, user_prompt, response_json=response_json)
+        _log_curl_request("POST", url, headers, payload)
+
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{settings.openai_api_base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.openai_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.1,
-                    **({"response_format": {"type": "json_object"}} if response_json else {}),
-                },
-            )
+            response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             return data["choices"][0]["message"]["content"]
@@ -103,27 +137,31 @@ async def extract_metadata(file_path: str, tags: dict, language: str = "简体�
     if result is None:
         return None
     try:
+        if result.startswith("```json") and result.endswith("```"):
+            result = result[7:-3].strip()
         return json.loads(result)
     except json.JSONDecodeError:
-        logger.error(f"Failed to parse LLM response as JSON: {result[:200]}")
+        logger.error(f"Failed to parse LLM response as JSON: {result}")
         return None
 
 
 async def get_embedding(text: str) -> Optional[list[float]]:
     """Get embedding vector for text using OpenAI-compatible API."""
+    if not settings.enable_embeddings:
+        logger.info("Embeddings are disabled; skipping embedding request")
+        return None
+
     try:
+        url = f"{settings.openai_api_base}/embeddings"
+        headers = {
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {"model": settings.openai_embedding_model, "input": text}
+        _log_curl_request("POST", url, headers, payload)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{settings.openai_api_base}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.openai_embedding_model,
-                    "input": text,
-                },
-            )
+            response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             return data["data"][0]["embedding"]

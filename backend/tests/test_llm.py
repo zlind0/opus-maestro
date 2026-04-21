@@ -1,8 +1,10 @@
 """Tests for LLM prompt building, canonical string, and metadata extraction."""
 
 import json
+import httpx
 import pytest
-from app.llm import build_extraction_prompt, build_canonical_string
+from app import llm
+from app.llm import build_extraction_prompt, build_canonical_string, build_chat_completion_payload
 
 
 class TestBuildExtractionPrompt:
@@ -27,6 +29,31 @@ class TestBuildExtractionPrompt:
         # Tags should be JSON-formatted in the prompt
         assert "Mozart" in user
         assert "Jupiter" in user
+
+
+class TestBuildChatCompletionPayload:
+    def test_think_disabled_by_default(self):
+        original = llm.settings.llm_enable_think
+        llm.settings.llm_enable_think = False
+        try:
+            payload = build_chat_completion_payload("system", "user")
+        finally:
+            llm.settings.llm_enable_think = original
+
+        assert payload["model"] == llm.settings.openai_model
+        # assert payload["response_format"] == {"type": "json_object"}
+        assert "think" not in payload
+
+    def test_think_enabled_adds_flag(self):
+        original = llm.settings.llm_enable_think
+        llm.settings.llm_enable_think = True
+        try:
+            payload = build_chat_completion_payload("system", "user", response_json=False)
+        finally:
+            llm.settings.llm_enable_think = original
+
+        assert payload["think"] is True
+        assert "response_format" not in payload
 
 
 class TestBuildCanonicalString:
@@ -81,3 +108,20 @@ class TestMetadataExtraction:
             metadata = {"composer": "Test", "work_title": "Test", "era": era}
             canonical = build_canonical_string(metadata)
             assert f"Era: {era}" in canonical
+
+
+@pytest.mark.asyncio
+async def test_get_embedding_returns_none_when_disabled(monkeypatch):
+    original = llm.settings.enable_embeddings
+    llm.settings.enable_embeddings = False
+
+    async def fail_post(*args, **kwargs):
+        raise AssertionError("embedding request should not be sent when disabled")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fail_post)
+    try:
+        result = await llm.get_embedding("test")
+    finally:
+        llm.settings.enable_embeddings = original
+
+    assert result is None

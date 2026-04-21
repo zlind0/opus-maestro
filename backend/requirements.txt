@@ -11,3 +11,4 @@ httpx==0.28.1
 mutagen==1.47.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
+pytest

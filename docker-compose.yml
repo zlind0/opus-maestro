@@ -32,6 +32,8 @@ services:
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      ENABLE_EMBEDDINGS: ${ENABLE_EMBEDDINGS:-false}
+      LLM_ENABLE_THINK: ${LLM_ENABLE_THINK:-false}
       MUSIC_PATH: /music
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-zh-CN}
