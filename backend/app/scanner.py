@@ -15,7 +15,7 @@ from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.apev2 import APEv2
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -55,6 +55,25 @@ def extract_tags(file_path: str) -> dict:
         logger.warning(f"Tag extraction failed for {file_path}: {e}")
 
     return tags
+
+
+def _sanitize_composer(val: Optional[str]) -> str:
+    """Return a safe composer string; use '其他' when missing or empty.
+
+    Treat common placeholders like 'Unknown' or empty strings as missing.
+    """
+    if val is None:
+        return "其他"
+    try:
+        s = str(val).strip()
+    except Exception:
+        return "其他"
+    if not s:
+        return "其他"
+    lowered = s.lower()
+    if lowered in ("unknown", "unknown work", "unk", "other", "n/a", "none"):
+        return "其他"
+    return s
 
 
 def parse_cue_file(cue_path: str) -> list[dict]:
@@ -147,7 +166,7 @@ async def find_or_create_work(
     db: AsyncSession, metadata: dict
 ) -> Work:
     """Find existing work or create new one based on extracted metadata."""
-    composer = metadata.get("composer", "Unknown")
+    composer = _sanitize_composer(metadata.get("composer") or metadata.get("artist"))
     catalog_number = metadata.get("catalog_number")
 
     # Try to find by composer + catalog number
@@ -340,7 +359,7 @@ async def process_single_file(
     if metadata is None:
         # Fallback: create basic records from tags
         metadata = {
-            "composer": tags.get("composer") or tags.get("artist") or "Unknown",
+            "composer": _sanitize_composer(tags.get("composer") or tags.get("artist")),
             "work_title": tags.get("album") or tags.get("title") or "Unknown Work",
             "era": None,
             "work_type": None,
@@ -509,7 +528,9 @@ async def run_scan(scan_job_id: uuid.UUID, mode: str = "incremental"):
             unknown_paths = set()
             if mode == "with_unknowns":
                 try:
-                    stmt = select(AudioFile.file_path).join(AudioFile.segments).join(AudioSegment.movement).join(Movement.work).where(Work.title == "Unknown Work")
+                    stmt = select(AudioFile.file_path).join(AudioFile.segments).join(AudioSegment.movement).join(Movement.work).where(
+                        or_(Work.title == "Unknown Work", Work.composer == "其他")
+                    )
                     res = await db.execute(stmt)
                     unknown_paths = set(res.scalars().all())
                 except Exception as e:
