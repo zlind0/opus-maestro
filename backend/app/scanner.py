@@ -489,11 +489,21 @@ async def run_scan(scan_job_id: uuid.UUID, mode: str = "incremental"):
                 else:
                     mode = "incremental"
 
-            # If full, delete all AudioFile entries so process_single_file will
-            # recreate them.
+            # If full, clear all audio-related tables so the database is
+            # rebuilt from scratch during the scan. Delete in dependency
+            # order to avoid FK constraint issues and avoid relying on DB
+            #-level ON DELETE behavior.
             if mode == "full":
-                await db.execute(delete(AudioFile))
-                await db.commit()
+                try:
+                    await db.execute(delete(AudioSegment))
+                    await db.execute(delete(AudioFile))
+                    await db.execute(delete(Movement))
+                    await db.execute(delete(Version))
+                    await db.execute(delete(Work))
+                    await db.commit()
+                except Exception as e:
+                    logger.warning(f"Failed to clear audio-related tables for full scan: {e}")
+                    await db.rollback()
 
             # For 'with_unknowns' mode, pre-compute paths that should be reprocessed
             unknown_paths = set()
