@@ -17,43 +17,35 @@ METADATA_EXTRACTION_SYSTEM_PROMPT = """You are a classical music metadata expert
 You MUST respond with valid JSON only, no other text. Use the following schema:
 
 {
-  "composer": "作曲家全名(使用{language})",
-  "work_title": "作品标题(使用{language})",
-  "key": "调号 (e.g. G minor, D major)",
-  "catalog_number": "目录编号 (e.g. K. 550, Op. 67, BWV 232)",
+  "composer": "作曲家为人熟知的简名(使用{language})，示例：巴赫，莫扎特，贝多芬，肖邦，德彪西，约翰·威廉姆斯，勃拉姆斯，柴可夫斯基，李斯特，拉赫玛尼诺夫，斯特拉文斯基，马勒，布鲁克纳，门德尔松，舒曼，维瓦尔第，亨德尔，普契尼，威尔第，理查德·施特劳斯，斯特劳斯，格里格，拉威尔，福雷，布拉姆斯，舒伯特，门德尔松，德沃夏克，西贝柳斯，埃尔加，巴托克，肖斯塔科维奇，普罗科菲耶夫"),",
+  "work_title": "作品标题(使用{language}，构成为[题材+编号+标题]，不含作品编号（Op BWV K. 等等都不要出现）。示例：交响曲第5号《命运》，钢琴协奏曲第1号，G大调小提琴奏鸣曲，D大调前奏曲，A大调夜曲，C小调弦乐四重奏，钢琴奏鸣曲第14号《月光》",
+  "key": "调号 (e.g. G小调, D大调)",
+  "catalog_number": "作品编号 (e.g. K. 550, Op. 67, BWV 232)",
   "work_type": "作品类型(使用{language}, e.g. 交响曲, 协奏曲, 奏鸣曲, 室内乐, 歌剧, 合唱, 独奏曲)",
   "era": "创作年代(使用{language}, 文艺复兴/巴洛克/古典/浪漫/民族主义/印象主义/现代/后现代/当代)",
-  "movement_number": 1,
+  "movement_number": "乐章编号 (如果不清楚，使用null)",
   "movement_title": "乐章标题",
-  "mood": "情绪 (joyful/melancholic/agitated/calm/mysterious/solemn/playful)",
+  "mood": "情绪 (喜悦的/忧郁的/激动的/平静的/神秘的/庄严的/顽皮的/愤怒的/惊恐的)",
   "conductor": "指挥(if available)",
   "ensemble": "乐团/演奏者(if available)",
   "soloists": "独奏家(if available)",
-  "year": 2000,
+  "year": "唱片录制年份(if available)",
   "label": "唱片厂牌(if available)",
   "description": "乐章简短描述(使用{language})",
   "work_summary": "作品简介(使用{language})"
 }
 
-Rules:
-- Fill in as many fields as possible based on available information
-- Use null for fields that cannot be determined
-- For movement_number, if unclear, use 1
-- Normalize composer names to their most recognized form in {language}
-- Catalog numbers should follow standard conventions (K., Op., BWV, etc.)
-- The mood field MUST be one of: joyful, melancholic, agitated, calm, mysterious, solemn, playful
-- era MUST be one of: 文艺复兴, 巴洛克, 古典, 浪漫, 民族主义, 印象主义, 现代, 后现代, 当代
-- work_type MUST be in {language}
+- 字段使用 {language}
 """
 
-METADATA_EXTRACTION_USER_TEMPLATE = """Extract metadata from this audio file:
+METADATA_EXTRACTION_USER_TEMPLATE = """从此音频文件中提取元数据：
 
-File path: {file_path}
+路径: {file_path}
 
-Existing tags:
+现有标签:
 {tags_json}
 
-Please extract structured metadata as JSON."""
+请以JSON格式提取结构化元数据。如果某个字段不清楚或不存在，请使用null。不要添加任何额外的文本或解释，只返回JSON，对于不确定和不知道的东西，你最好保持沉默。"""
 
 
 def build_extraction_prompt(file_path: str, tags: dict, language: str = "简体中文") -> tuple[str, str]:
