@@ -3,7 +3,8 @@
     <div class="player-bar-inner leather-bar">
       <!-- Track info -->
       <div class="player-info">
-        <div class="player-vinyl" :class="{ spinning: player.isPlaying }">♫</div>
+        <div class="player-vinyl" :class="{ spinning: false }">♫</div>
+        <!-- don't spin, save battery.  spinning: player.isPlaying -->
         <div class="player-text">
           <div class="player-title">{{ player.currentMovement?.title || player.currentWork.title }}</div>
           <div class="player-artist">{{ player.currentWork.composer }}</div>

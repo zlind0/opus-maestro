@@ -1,6 +1,7 @@
 """Music library scanner — discovers audio files, extracts tags, calls LLM for metadata."""
 
 import asyncio
+from difflib import SequenceMatcher
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.llm import build_canonical_string, extract_metadata, get_embedding
+from app.llm import build_canonical_string, extract_metadata, extract_metadata_batch, get_embedding
 from app.models import AudioFile, AudioSegment, Movement, ScanJob, Version, Work
 
 logger = logging.getLogger(__name__)
@@ -216,7 +217,27 @@ async def find_or_create_version(
     """Find existing version or create new one."""
     conductor = metadata.get("conductor")
     ensemble = metadata.get("ensemble")
-    year = metadata.get("year")
+    # Coerce year into an integer when possible; if not, leave as None.
+    raw_year = metadata.get("year")
+    year = None
+    if raw_year is not None:
+        try:
+            if isinstance(raw_year, int):
+                year = raw_year
+            else:
+                s = str(raw_year).strip()
+                # Direct integer parse first (handles '2017' and '2017\n')
+                year = int(s)
+        except Exception:
+            # Fallback: extract first 4-digit year substring, if any
+            try:
+                m = re.search(r"(\d{4})", str(raw_year))
+                if m:
+                    year = int(m.group(1))
+                else:
+                    year = None
+            except Exception:
+                year = None
 
     if conductor or ensemble:
         stmt = select(Version).where(Version.work_id == work.id)
@@ -242,6 +263,88 @@ async def find_or_create_version(
     return version
 
 
+async def _force_cleanup_audio_file(db: AsyncSession, existing: AudioFile, file_path: str) -> None:
+    """Remove an existing AudioFile record and clean up orphaned Movements / Works."""
+    try:
+        try:
+            rows = await db.execute(
+                select(AudioSegment.movement_id, Movement.work_id)
+                .join(Movement, AudioSegment.movement_id == Movement.id)
+                .where(AudioSegment.file_id == existing.id)
+            )
+            pairs = rows.all() or []
+        except Exception:
+            pairs = []
+
+        movement_ids = {m for m, _ in pairs if m}
+        work_ids = {w for _, w in pairs if w}
+
+        await db.execute(delete(AudioFile).where(AudioFile.id == existing.id))
+        await db.flush()
+
+        for mov_id in movement_ids:
+            try:
+                seg_check = await db.execute(select(AudioSegment.id).where(AudioSegment.movement_id == mov_id).limit(1))
+                if seg_check.scalar_one_or_none() is None:
+                    await db.execute(delete(Movement).where(Movement.id == mov_id))
+            except Exception:
+                logger.warning(f"Failed to cleanup Movement {mov_id} after reprocessing {file_path}")
+
+        for work_id in work_ids:
+            try:
+                cnt_res = await db.execute(select(func.count()).select_from(Movement).where(Movement.work_id == work_id))
+                cnt = cnt_res.scalar_one() or 0
+                work_obj_res = await db.execute(select(Work).where(Work.id == work_id))
+                work_obj = work_obj_res.scalar_one_or_none()
+                if work_obj:
+                    work_obj.movement_count = int(cnt)
+                    if work_obj.movement_count == 0 and getattr(work_obj, 'title', None) == "Unknown Work":
+                        try:
+                            ver_check = await db.execute(select(Version.id).where(Version.work_id == work_id).limit(1))
+                            if ver_check.scalar_one_or_none() is None:
+                                await db.execute(delete(Work).where(Work.id == work_id))
+                        except Exception:
+                            logger.warning(f"Failed to delete empty Unknown Work {work_id}")
+            except Exception:
+                logger.warning(f"Failed to update movement_count for Work {work_id}")
+
+        await db.flush()
+    except Exception:
+        logger.warning(f"Failed to delete existing AudioFile before reprocessing: {file_path}")
+
+
+def group_files_by_work(files: list[str]) -> list[list[str]]:
+    """Group audio files into likely movements of the same musical work.
+
+    Within each directory, consecutive files (alphabetically sorted) whose
+    basenames have a SequenceMatcher similarity ratio >= 0.7 are considered
+    movements of the same work and placed in the same group.
+    """
+    # Bucket by directory (files are already globally sorted)
+    dir_buckets: dict[str, list[str]] = {}
+    for f in files:
+        d = os.path.dirname(f)
+        dir_buckets.setdefault(d, []).append(f)
+
+    result: list[list[str]] = []
+    for dir_files in dir_buckets.values():
+        dir_files.sort()
+        if not dir_files:
+            continue
+        current_group = [dir_files[0]]
+        for i in range(1, len(dir_files)):
+            a = os.path.basename(dir_files[i - 1])
+            b = os.path.basename(dir_files[i])
+            ratio = SequenceMatcher(None, a, b).ratio()
+            if ratio >= 0.7:
+                current_group.append(dir_files[i])
+            else:
+                result.append(current_group)
+                current_group = [dir_files[i]]
+        result.append(current_group)
+    return result
+
+
 async def process_single_file(
     db: AsyncSession, file_path: str, language: str = "简体中文", force: bool = False
 ) -> Optional[AudioFile]:
@@ -259,76 +362,8 @@ async def process_single_file(
         logger.info(f"Skipping already scanned file: {file_path}")
         return None
 
-    # If force is requested and an existing record exists, delete it so we
-    # create fresh records for this file. Also remove any Movements that
-    # become orphaned after removing the file's AudioSegments, and update
-    # the parent Work's movement_count accordingly. This prevents stale
-    # "Unknown Work" records from accumulating.
     if existing and force:
-        try:
-            # collect affected movement ids and their work ids before deletion
-            try:
-                rows = await db.execute(
-                    select(AudioSegment.movement_id, Movement.work_id)
-                    .join(Movement, AudioSegment.movement_id == Movement.id)
-                    .where(AudioSegment.file_id == existing.id)
-                )
-                pairs = rows.all() or []
-            except Exception:
-                pairs = []
-
-            movement_ids = {m for m, _ in pairs if m}
-            work_ids = {w for _, w in pairs if w}
-
-            await db.execute(delete(AudioFile).where(AudioFile.id == existing.id))
-            await db.flush()
-
-            # For each movement previously associated with this file, if it
-            # has no remaining audio segments, delete it.
-            for mov_id in movement_ids:
-                try:
-                    seg_check = await db.execute(select(AudioSegment.id).where(AudioSegment.movement_id == mov_id).limit(1))
-                    if seg_check.scalar_one_or_none() is None:
-                        await db.execute(delete(Movement).where(Movement.id == mov_id))
-                except Exception:
-                    logger.warning(f"Failed to cleanup Movement {mov_id} after reprocessing {file_path}")
-
-            # Update movement_count for affected works and remove entirely
-            # empty 'Unknown Work' entries for cleanliness.
-            for work_id in work_ids:
-                try:
-                    cnt_res = await db.execute(select(func.count()).select_from(Movement).where(Movement.work_id == work_id))
-                    cnt = cnt_res.scalar_one() or 0
-                    await db.execute(
-                        select(Work).where(Work.id == work_id)
-                    )
-                    # Update movement_count via ORM-friendly update
-                    await db.execute(
-                        # Use SQLAlchemy core update via delete().where() isn't suitable; use simple UPDATE through text-expression
-                        # But to keep it simple here, load the Work and set attribute
-                        select(Work).where(Work.id == work_id)
-                    )
-                    # Fetch work and set movement_count if present
-                    work_obj_res = await db.execute(select(Work).where(Work.id == work_id))
-                    work_obj = work_obj_res.scalar_one_or_none()
-                    if work_obj:
-                        work_obj.movement_count = int(cnt)
-                        # If this is an 'Unknown Work' and now has no movements and
-                        # no versions, delete the Work record to avoid clutter.
-                        if work_obj.movement_count == 0 and getattr(work_obj, 'title', None) == "Unknown Work":
-                            try:
-                                ver_check = await db.execute(select(Version.id).where(Version.work_id == work_id).limit(1))
-                                if ver_check.scalar_one_or_none() is None:
-                                    await db.execute(delete(Work).where(Work.id == work_id))
-                            except Exception:
-                                logger.warning(f"Failed to delete empty Unknown Work {work_id}")
-                except Exception:
-                    logger.warning(f"Failed to update movement_count for Work {work_id}")
-
-            await db.flush()
-        except Exception:
-            # If deletion fails, proceed but log a warning
-            logger.warning(f"Failed to delete existing AudioFile before reprocessing: {file_path}")
+        await _force_cleanup_audio_file(db, existing, file_path)
 
     # Extract tags
     tags = extract_tags(file_path)
@@ -407,7 +442,7 @@ async def process_single_file(
         work.movement_count = max(work.movement_count or 0, len(cue_tracks))
     else:
         # Single file: one segment = one movement
-        mv_number = metadata.get("movement_number") or 1
+        mv_number = _coerce_int(metadata.get("movement_number")) or 1
         movement = Movement(
             work_id=work.id,
             version_id=version.id,
@@ -457,6 +492,168 @@ def _parse_year(val) -> Optional[int]:
         return int(str(val)[:4])
     except (ValueError, IndexError):
         return None
+
+
+def _coerce_int(val) -> Optional[int]:
+    """Try to coerce a value to int. Return None on failure."""
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    try:
+        return int(s)
+    except Exception:
+        import re as _re
+
+        m = _re.search(r"(\d+)", s)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        return None
+
+
+async def process_file_group(
+    db: AsyncSession, file_paths: list[str], language: str = "简体中文", force: bool = False
+) -> list[Optional[AudioFile]]:
+    """Process a group of audio files that belong to the same musical work.
+
+    When the group has more than one file, all movements are sent to the LLM
+    in a single batch call so that work-level metadata (composer, title, etc.)
+    is guaranteed to be consistent across all movements.
+    """
+    if len(file_paths) == 1:
+        result = await process_single_file(db, file_paths[0], language, force)
+        return [result]
+
+    # --- Determine which files actually need processing ---
+    to_process: list[str] = []
+    for fp in file_paths:
+        res = await db.execute(select(AudioFile).where(AudioFile.file_path == fp))
+        existing = res.scalar_one_or_none()
+        if existing and not force:
+            logger.info(f"Skipping already scanned file: {fp}")
+        else:
+            to_process.append(fp)
+
+    if not to_process:
+        return [None] * len(file_paths)
+
+    # If only one file still needs processing, dispatch to the single-file path
+    if len(to_process) == 1:
+        result = await process_single_file(db, to_process[0], language, force)
+        return [result if fp == to_process[0] else None for fp in file_paths]
+
+    # --- Force-cleanup existing records for files being reprocessed ---
+    if force:
+        for fp in to_process:
+            res = await db.execute(select(AudioFile).where(AudioFile.file_path == fp))
+            existing = res.scalar_one_or_none()
+            if existing:
+                await _force_cleanup_audio_file(db, existing, fp)
+
+    # --- Extract tags and create AudioFile records ---
+    tags_list = [extract_tags(fp) for fp in to_process]
+    audio_files: list[AudioFile] = []
+    for fp, tags in zip(to_process, tags_list):
+        file_format = os.path.splitext(fp)[1].lstrip(".").lower()
+        audio_file = AudioFile(
+            file_path=fp,
+            file_format=file_format,
+            file_size=os.path.getsize(fp),
+            duration_ms=tags.get("duration_ms"),
+            sample_rate=tags.get("sample_rate"),
+            bit_depth=tags.get("bit_depth"),
+            channels=tags.get("channels"),
+            raw_tags=json.dumps(tags, ensure_ascii=False),
+        )
+        cue_path = find_cue_for_audio(fp)
+        if cue_path:
+            audio_file.cue_path = cue_path
+        db.add(audio_file)
+        audio_files.append(audio_file)
+    await db.flush()
+
+    # --- Single batch LLM call for all movements ---
+    logger.info(f"Batch LLM extraction for {len(to_process)} files in group: {[os.path.basename(f) for f in to_process]}")
+    metadata_list = await extract_metadata_batch(to_process, tags_list, language)
+
+    # Use the first valid metadata entry as the authoritative source for
+    # work-level fields, so all movements are guaranteed to share the same Work.
+    first_valid = next((m for m in metadata_list if m is not None), None)
+
+    work: Optional[Work] = None
+    version: Optional[Version] = None
+
+    results: list[Optional[AudioFile]] = []
+    for i, (fp, audio_file, tags) in enumerate(zip(to_process, audio_files, tags_list)):
+        metadata = metadata_list[i]
+        if metadata is None:
+            metadata = {
+                "composer": _sanitize_composer(tags.get("composer") or tags.get("artist")),
+                "work_title": tags.get("album") or tags.get("title") or "Unknown Work",
+                "era": None,
+                "work_type": None,
+                "catalog_number": None,
+                "movement_title": tags.get("title"),
+                "movement_number": _parse_track_number(tags.get("tracknumber")),
+                "mood": None,
+                "conductor": tags.get("conductor"),
+                "ensemble": tags.get("ensemble"),
+                "soloists": tags.get("performer"),
+                "year": _parse_year(tags.get("date")),
+                "label": tags.get("label") or tags.get("organization"),
+            }
+
+        # Enforce work-level consistency from the first valid metadata
+        if first_valid is not None and i > 0:
+            for key in ("composer", "work_title", "key", "catalog_number", "work_type",
+                        "era", "conductor", "ensemble", "soloists", "year", "label", "work_summary"):
+                if first_valid.get(key) is not None:
+                    metadata[key] = first_valid[key]
+
+        if work is None:
+            work = await find_or_create_work(db, metadata)
+            version = await find_or_create_version(db, work, metadata)
+
+        # Ensure movement_number is an int when possible
+        mv_number = _coerce_int(metadata.get("movement_number"))
+        if mv_number is None:
+            mv_number = i + 1
+        movement = Movement(
+            work_id=work.id,
+            version_id=version.id,
+            movement_number=mv_number,
+            title=metadata.get("movement_title"),
+            mood=metadata.get("mood"),
+            description=metadata.get("description"),
+        )
+        db.add(movement)
+        await db.flush()
+
+        segment = AudioSegment(
+            file_id=audio_file.id,
+            movement_id=movement.id,
+            start_time_ms=0,
+            end_time_ms=None,
+            is_virtual=False,
+        )
+        db.add(segment)
+
+        work.movement_count = max(work.movement_count or 0, mv_number)
+
+        canonical = build_canonical_string(metadata)
+        if canonical and getattr(settings, "enable_embeddings", True):
+            embedding = await get_embedding(canonical)
+            if embedding:
+                movement.embedding = embedding
+
+        results.append(audio_file)
+
+    await db.flush()
+    return results
 
 
 async def run_scan(scan_job_id: uuid.UUID, mode: str = "incremental"):
@@ -536,29 +733,31 @@ async def run_scan(scan_job_id: uuid.UUID, mode: str = "incremental"):
                 except Exception as e:
                     logger.warning(f"Failed to compute unknown work paths: {e}")
 
-            for i, file_path in enumerate(files):
+            # Group files by likely musical work so movements of the same piece
+            # are processed together in a single LLM call.
+            file_groups = group_files_by_work(files)
+
+            processed_count = 0
+            for group in file_groups:
                 try:
                     if mode == "incremental":
-                        await process_single_file(db, file_path, settings.default_language, force=False)
+                        await process_file_group(db, group, settings.default_language, force=False)
                     elif mode == "with_unknowns":
-                        if file_path in unknown_paths:
-                            await process_single_file(db, file_path, settings.default_language, force=True)
-                        else:
-                            await process_single_file(db, file_path, settings.default_language, force=False)
+                        force_group = any(fp in unknown_paths for fp in group)
+                        await process_file_group(db, group, settings.default_language, force=force_group)
                     elif mode == "full":
-                        # all AudioFile entries removed earlier, so treat as fresh
-                        await process_single_file(db, file_path, settings.default_language, force=False)
+                        await process_file_group(db, group, settings.default_language, force=False)
                     else:
-                        # fallback to incremental behavior
-                        await process_single_file(db, file_path, settings.default_language, force=False)
+                        await process_file_group(db, group, settings.default_language, force=False)
 
                     await db.commit()
                 except Exception as e:
-                    logger.error(f"Error processing {file_path}: {e}")
+                    logger.error(f"Error processing group {[os.path.basename(f) for f in group]}: {e}")
                     await db.rollback()
 
-                job.processed_files = i + 1
-                job.message = f"Processing: {os.path.basename(file_path)}"
+                processed_count += len(group)
+                job.processed_files = processed_count
+                job.message = f"Processing: {os.path.basename(group[-1])}"
                 await db.commit()
 
             job.status = "completed"
