@@ -12,6 +12,14 @@
       </p>
 
       <div class="scan-controls">
+        <div class="mode-select-wrap">
+          <select v-model="scanMode" class="mode-select" aria-label="扫描模式">
+            <option value="incremental">仅扫描新增</option>
+            <option value="with_unknowns">包含 Unknown 重扫描</option>
+            <option value="full">全部重新扫描</option>
+          </select>
+        </div>
+
         <button class="btn-gold" @click="startScan" :disabled="scanning">
           {{ scanning ? '扫描中...' : '开始扫描' }}
         </button>
@@ -68,6 +76,7 @@ const router = useRouter()
 
 const scanStatus = ref<ScanStatus | null>(null)
 const scanning = ref(false)
+const scanMode = ref<'incremental' | 'with_unknowns' | 'full'>('incremental')
 const stats = ref({ works: 0, composers: 0, movements: 0 })
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -98,7 +107,7 @@ const statusClass = computed(() => {
 async function startScan() {
   scanning.value = true
   try {
-    await triggerScan()
+    await triggerScan(scanMode.value)
     startPolling()
   } catch (e: any) {
     console.error(e)
@@ -166,6 +175,54 @@ onMounted(() => {
 .scan-controls {
   display: flex;
   gap: 0.5rem;
+}
+
+.mode-select-wrap {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 0.5rem;
+}
+
+.mode-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 0.45rem 2.2rem 0.45rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-groove);
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.12));
+  color: var(--text-primary);
+  font-family: var(--font-serif);
+  font-size: 0.95rem;
+  box-shadow: var(--shadow-inset);
+  transition: box-shadow 0.12s ease, transform 0.08s ease;
+  min-height: 38px;
+}
+
+.mode-select:focus {
+  outline: none;
+  border-color: var(--accent-gold);
+  box-shadow: 0 0 0 3px rgba(201,169,110,0.08), var(--shadow-inset);
+}
+
+.mode-select-wrap::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0.9rem;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23c9a96e' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-size: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 0 rgba(0,0,0,0.4));
+}
+
+.mode-select option {
+  background: var(--bg-inset);
+  color: var(--text-primary);
 }
 
 .scan-status { }

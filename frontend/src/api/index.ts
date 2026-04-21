@@ -117,8 +117,9 @@ export function getRecommendations(movementId: string, limit: number = 5) {
 }
 
 // Scan
-export function triggerScan() {
-  return request<{ message: string }>(`${BASE}/scan`, { method: 'POST' })
+export function triggerScan(mode: 'incremental' | 'with_unknowns' | 'full' = 'incremental') {
+  const url = `${BASE}/scan?mode=${encodeURIComponent(mode)}`
+  return request<{ message: string }>(url, { method: 'POST' })
 }
 
 export function getScanStatus() {

@@ -24,6 +24,7 @@ async def trigger_scan(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_admin),
+    mode: str = "incremental",
 ):
     global _latest_scan_id
 
@@ -34,13 +35,20 @@ async def trigger_scan(
         if existing and existing.status == "running":
             return {"message": "Scan already in progress", "scan_id": str(_latest_scan_id)}
 
+    # Validate mode
+    allowed = ("incremental", "with_unknowns", "full")
+    if mode not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid scan mode: {mode}")
+
     job = ScanJob()
+    # record requested mode in job.message for visibility
+    job.message = mode
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
     _latest_scan_id = job.id
-    background_tasks.add_task(run_scan, job.id)
+    background_tasks.add_task(run_scan, job.id, mode)
 
     return {"message": "Scan started", "scan_id": str(job.id)}
 

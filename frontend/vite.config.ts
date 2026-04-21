@@ -46,5 +46,11 @@ export default defineConfig({
       '/api': { target: 'http://localhost:8000', changeOrigin: true },
       '/health': { target: 'http://localhost:8000', changeOrigin: true },
     },
+    // Allow container hostnames (e.g. docker-compose service name 'frontend')
+    allowedHosts: [
+      'frontend',
+      'localhost',
+      '127.0.0.1',
+    ],
   },
 })

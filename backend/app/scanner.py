@@ -15,7 +15,7 @@ from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.apev2 import APEv2
-from sqlalchemy import select
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -224,14 +224,92 @@ async def find_or_create_version(
 
 
 async def process_single_file(
-    db: AsyncSession, file_path: str, language: str = "简体中文"
+    db: AsyncSession, file_path: str, language: str = "简体中文", force: bool = False
 ) -> Optional[AudioFile]:
-    """Process a single audio file: extract tags, call LLM, create DB records."""
-    # Check if already scanned
+    """Process a single audio file: extract tags, call LLM, create DB records.
+
+    If `force` is True, any existing `AudioFile` entry for `file_path` will be
+    removed before reprocessing (useful when re-scanning files marked as
+    unknown work or for a full reindex).
+    """
+    # Check if already scanned (unless force requested)
+    existing = None
     result = await db.execute(select(AudioFile).where(AudioFile.file_path == file_path))
-    if result.scalar_one_or_none():
+    existing = result.scalar_one_or_none()
+    if existing and not force:
         logger.info(f"Skipping already scanned file: {file_path}")
         return None
+
+    # If force is requested and an existing record exists, delete it so we
+    # create fresh records for this file. Also remove any Movements that
+    # become orphaned after removing the file's AudioSegments, and update
+    # the parent Work's movement_count accordingly. This prevents stale
+    # "Unknown Work" records from accumulating.
+    if existing and force:
+        try:
+            # collect affected movement ids and their work ids before deletion
+            try:
+                rows = await db.execute(
+                    select(AudioSegment.movement_id, Movement.work_id)
+                    .join(Movement, AudioSegment.movement_id == Movement.id)
+                    .where(AudioSegment.file_id == existing.id)
+                )
+                pairs = rows.all() or []
+            except Exception:
+                pairs = []
+
+            movement_ids = {m for m, _ in pairs if m}
+            work_ids = {w for _, w in pairs if w}
+
+            await db.execute(delete(AudioFile).where(AudioFile.id == existing.id))
+            await db.flush()
+
+            # For each movement previously associated with this file, if it
+            # has no remaining audio segments, delete it.
+            for mov_id in movement_ids:
+                try:
+                    seg_check = await db.execute(select(AudioSegment.id).where(AudioSegment.movement_id == mov_id).limit(1))
+                    if seg_check.scalar_one_or_none() is None:
+                        await db.execute(delete(Movement).where(Movement.id == mov_id))
+                except Exception:
+                    logger.warning(f"Failed to cleanup Movement {mov_id} after reprocessing {file_path}")
+
+            # Update movement_count for affected works and remove entirely
+            # empty 'Unknown Work' entries for cleanliness.
+            for work_id in work_ids:
+                try:
+                    cnt_res = await db.execute(select(func.count()).select_from(Movement).where(Movement.work_id == work_id))
+                    cnt = cnt_res.scalar_one() or 0
+                    await db.execute(
+                        select(Work).where(Work.id == work_id)
+                    )
+                    # Update movement_count via ORM-friendly update
+                    await db.execute(
+                        # Use SQLAlchemy core update via delete().where() isn't suitable; use simple UPDATE through text-expression
+                        # But to keep it simple here, load the Work and set attribute
+                        select(Work).where(Work.id == work_id)
+                    )
+                    # Fetch work and set movement_count if present
+                    work_obj_res = await db.execute(select(Work).where(Work.id == work_id))
+                    work_obj = work_obj_res.scalar_one_or_none()
+                    if work_obj:
+                        work_obj.movement_count = int(cnt)
+                        # If this is an 'Unknown Work' and now has no movements and
+                        # no versions, delete the Work record to avoid clutter.
+                        if work_obj.movement_count == 0 and getattr(work_obj, 'title', None) == "Unknown Work":
+                            try:
+                                ver_check = await db.execute(select(Version.id).where(Version.work_id == work_id).limit(1))
+                                if ver_check.scalar_one_or_none() is None:
+                                    await db.execute(delete(Work).where(Work.id == work_id))
+                            except Exception:
+                                logger.warning(f"Failed to delete empty Unknown Work {work_id}")
+                except Exception:
+                    logger.warning(f"Failed to update movement_count for Work {work_id}")
+
+            await db.flush()
+        except Exception:
+            # If deletion fails, proceed but log a warning
+            logger.warning(f"Failed to delete existing AudioFile before reprocessing: {file_path}")
 
     # Extract tags
     tags = extract_tags(file_path)
@@ -333,9 +411,9 @@ async def process_single_file(
 
         work.movement_count = max(work.movement_count or 0, mv_number)
 
-    # Generate embedding for the canonical string
+    # Generate embedding for the canonical string (if enabled)
     canonical = build_canonical_string(metadata)
-    if canonical:
+    if canonical and getattr(settings, "enable_embeddings", True):
         embedding = await get_embedding(canonical)
         if embedding and movement:
             movement.embedding = embedding
@@ -362,14 +440,23 @@ def _parse_year(val) -> Optional[int]:
         return None
 
 
-async def run_scan(scan_job_id: uuid.UUID):
-    """Background task: scan music library and index all files."""
+async def run_scan(scan_job_id: uuid.UUID, mode: str = "incremental"):
+    """Background task: scan music library and index files.
+
+    Supports three modes:
+      - "incremental": only process newly discovered files
+      - "with_unknowns": process new files and reprocess files linked to
+        works titled "Unknown Work"
+      - "full": delete existing `AudioFile` entries and reprocess all files
+
+    In all modes, any DB entries pointing to files that no longer exist on
+    disk are removed before indexing.
+    """
     async with async_session() as db:
         try:
             result = await db.execute(select(ScanJob).where(ScanJob.id == scan_job_id))
             job = result.scalar_one()
             job.status = "running"
-            # Use timezone-naive UTC datetimes to match DB columns (TIMESTAMP without time zone)
             job.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await db.commit()
 
@@ -378,9 +465,62 @@ async def run_scan(scan_job_id: uuid.UUID):
             job.total_files = len(files)
             await db.commit()
 
+            # Remove DB entries for files that no longer exist on disk
+            db_paths_result = await db.execute(select(AudioFile.file_path))
+            db_paths = set(db_paths_result.scalars().all())
+            files_set = set(files)
+            missing = db_paths - files_set
+            if missing:
+                for path in missing:
+                    try:
+                        await db.execute(delete(AudioFile).where(AudioFile.file_path == path))
+                    except Exception as e:
+                        logger.warning(f"Failed to delete missing audio file record {path}: {e}")
+                await db.commit()
+
+            # If full re-scan requested, clear all existing AudioFile entries so
+            # every file will be processed from scratch.
+            # Validate/normalize mode. Prefer explicit function argument; fall back
+            # to job.message if the provided mode is not valid.
+            allowed_modes = ("incremental", "with_unknowns", "full")
+            if not isinstance(mode, str) or mode not in allowed_modes:
+                if isinstance(job.message, str) and job.message in allowed_modes:
+                    mode = job.message
+                else:
+                    mode = "incremental"
+
+            # If full, delete all AudioFile entries so process_single_file will
+            # recreate them.
+            if mode == "full":
+                await db.execute(delete(AudioFile))
+                await db.commit()
+
+            # For 'with_unknowns' mode, pre-compute paths that should be reprocessed
+            unknown_paths = set()
+            if mode == "with_unknowns":
+                try:
+                    stmt = select(AudioFile.file_path).join(AudioFile.segments).join(AudioSegment.movement).join(Movement.work).where(Work.title == "Unknown Work")
+                    res = await db.execute(stmt)
+                    unknown_paths = set(res.scalars().all())
+                except Exception as e:
+                    logger.warning(f"Failed to compute unknown work paths: {e}")
+
             for i, file_path in enumerate(files):
                 try:
-                    await process_single_file(db, file_path, settings.default_language)
+                    if mode == "incremental":
+                        await process_single_file(db, file_path, settings.default_language, force=False)
+                    elif mode == "with_unknowns":
+                        if file_path in unknown_paths:
+                            await process_single_file(db, file_path, settings.default_language, force=True)
+                        else:
+                            await process_single_file(db, file_path, settings.default_language, force=False)
+                    elif mode == "full":
+                        # all AudioFile entries removed earlier, so treat as fresh
+                        await process_single_file(db, file_path, settings.default_language, force=False)
+                    else:
+                        # fallback to incremental behavior
+                        await process_single_file(db, file_path, settings.default_language, force=False)
+
                     await db.commit()
                 except Exception as e:
                     logger.error(f"Error processing {file_path}: {e}")
@@ -391,8 +531,7 @@ async def run_scan(scan_job_id: uuid.UUID):
                 await db.commit()
 
             job.status = "completed"
-            job.message = f"Scan complete: {len(files)} files processed"
-            # Store naive UTC datetime for compatibility with DB TIMESTAMP columns
+            job.message = f"Scan complete: {len(files)} files processed ({mode})"
             job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await db.commit()
 
