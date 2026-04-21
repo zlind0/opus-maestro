@@ -106,9 +106,9 @@ export function getMovementSegments(movementId: string) {
   return request<AudioSegment[]>(`${BASE}/audio/movements/${movementId}/segments`)
 }
 
-export function getAudioStreamUrl(segmentId: string, format: string = 'mp3') {
+export function getAudioStreamUrl(segmentId: string) {
   const token = getToken()
-  return `${BASE}/audio/segments/${segmentId}?target_format=${format}&token=${token}`
+  return `${BASE}/audio/segments/${segmentId}?token=${token}`
 }
 
 // Recommendations

@@ -6,22 +6,21 @@ import os
 import shutil
 from typing import AsyncGenerator, Optional
 
-from app.config import get_settings
-
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
-# Format mapping for FFmpeg output
-FORMAT_MAP = {
-    "mp3": {"codec": "libmp3lame", "content_type": "audio/mpeg", "ext": "mp3"},
-    "flac": {"codec": "flac", "content_type": "audio/flac", "ext": "flac"},
-    "m4a": {"codec": "aac", "content_type": "audio/mp4", "ext": "m4a"},
-    "aac": {"codec": "aac", "content_type": "audio/mp4", "ext": "m4a"},
-    "wav": {"codec": "pcm_s16le", "content_type": "audio/wav", "ext": "wav"},
+# Formats that browsers cannot play natively and must be transcoded to AAC
+TRANSCODE_TO_AAC = {"ape"}
+
+# Content-type map for native browser-playable formats
+NATIVE_CONTENT_TYPES = {
+    "mp3": "audio/mpeg",
+    "flac": "audio/flac",
+    "m4a": "audio/mp4",
+    "aac": "audio/mp4",
+    "wav": "audio/wav",
+    "ogg": "audio/ogg",
+    "opus": "audio/ogg",
 }
-
-# Formats that need conversion for browser playback
-NEEDS_CONVERSION = {"ape", "alac"}
 
 
 def get_ffmpeg_path() -> str:
@@ -31,71 +30,45 @@ def get_ffmpeg_path() -> str:
     return path
 
 
-def build_ffmpeg_command(
+def get_source_ext(file_path: str) -> str:
+    return os.path.splitext(file_path)[1].lstrip(".").lower()
+
+
+def requires_transcode(file_path: str) -> bool:
+    return get_source_ext(file_path) in TRANSCODE_TO_AAC
+
+
+def get_output_content_type(file_path: str) -> str:
+    """Return the content-type that will actually be served for this file."""
+    if requires_transcode(file_path):
+        return "audio/mp4"  # AAC in MP4 container
+    ext = get_source_ext(file_path)
+    return NATIVE_CONTENT_TYPES.get(ext, "audio/flac")
+
+
+async def stream_audio_transcode(
     file_path: str,
-    target_format: str = "flac",
     start_ms: Optional[int] = None,
     end_ms: Optional[int] = None,
-) -> list[str]:
-    """Build FFmpeg command for audio streaming."""
+) -> AsyncGenerator[bytes, None]:
+    """Transcode APE (and other unsupported formats) to AAC/MP4 and stream."""
     ffmpeg = get_ffmpeg_path()
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
 
-    # Seek to start position
     if start_ms and start_ms > 0:
         cmd.extend(["-ss", f"{start_ms / 1000:.3f}"])
 
     cmd.extend(["-i", file_path])
 
-    # Duration (end - start)
     if end_ms is not None and end_ms > 0:
         start = start_ms or 0
-        duration = (end_ms - start) / 1000
-        cmd.extend(["-t", f"{duration:.3f}"])
+        duration_s = (end_ms - start) / 1000
+        cmd.extend(["-t", f"{duration_s:.3f}"])
 
-    # Output format
-    fmt = FORMAT_MAP.get(target_format, FORMAT_MAP["flac"])
-    cmd.extend(["-acodec", fmt["codec"]])
+    # AAC in fragmented MP4 — fragmented so it can be streamed without a seekable file
+    cmd.extend(["-acodec", "aac", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "pipe:1"])
 
-    # Output to stdout
-    cmd.extend(["-f", fmt["ext"], "pipe:1"])
-
-    return cmd
-
-
-def get_content_type(target_format: str) -> str:
-    fmt = FORMAT_MAP.get(target_format, FORMAT_MAP["flac"])
-    return fmt["content_type"]
-
-
-def detect_source_format(file_path: str) -> str:
-    """Detect format and determine if conversion is needed."""
-    ext = os.path.splitext(file_path)[1].lstrip(".").lower()
-    return ext
-
-
-def needs_conversion(file_path: str, target_format: str) -> bool:
-    """Check if the file needs transcoding."""
-    src = detect_source_format(file_path)
-    # APE always needs conversion
-    if src == "ape":
-        return True
-    # ALAC (m4a with alac codec) needs conversion to flac
-    if src == "m4a" and target_format == "flac":
-        return True  # Will check codec later
-    # Same format, no conversion needed (we still use ffmpeg for seeking)
-    return src != target_format
-
-
-async def stream_audio(
-    file_path: str,
-    target_format: str = "flac",
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-) -> AsyncGenerator[bytes, None]:
-    """Stream audio through FFmpeg, yielding chunks."""
-    cmd = build_ffmpeg_command(file_path, target_format, start_ms, end_ms)
-    logger.info(f"FFmpeg command: {' '.join(cmd)}")
+    logger.info(f"FFmpeg transcode command: {' '.join(cmd)}")
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -105,7 +78,7 @@ async def stream_audio(
 
     try:
         while True:
-            chunk = await process.stdout.read(65536)  # 64KB chunks
+            chunk = await process.stdout.read(65536)
             if not chunk:
                 break
             yield chunk
@@ -113,7 +86,29 @@ async def stream_audio(
         if process.returncode is None:
             process.kill()
             await process.wait()
-
         if process.returncode and process.returncode != 0:
             stderr = await process.stderr.read()
             logger.error(f"FFmpeg error: {stderr.decode()}")
+
+
+async def stream_native_file(
+    file_path: str,
+    start_byte: int = 0,
+    end_byte: Optional[int] = None,
+) -> AsyncGenerator[bytes, None]:
+    """Stream a native file directly, supporting byte-range reads."""
+    chunk_size = 65536
+    async with asyncio.timeout(300):
+        with open(file_path, "rb") as f:
+            f.seek(start_byte)
+            remaining = (end_byte - start_byte + 1) if end_byte is not None else None
+            while True:
+                to_read = chunk_size if remaining is None else min(chunk_size, remaining)
+                chunk = f.read(to_read)
+                if not chunk:
+                    break
+                yield chunk
+                if remaining is not None:
+                    remaining -= len(chunk)
+                    if remaining <= 0:
+                        break

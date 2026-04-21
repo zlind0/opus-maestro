@@ -24,7 +24,12 @@ export const usePlayerStore = defineStore('player', () => {
         progress.value = audio.value!.currentTime * 1000
       })
       audio.value.addEventListener('loadedmetadata', () => {
-        duration.value = audio.value!.duration * 1000
+        // Only use the browser-reported duration if it's valid (> 0) and
+        // we don't already have a reliable value from segment metadata.
+        const browserDuration = audio.value!.duration * 1000
+        if (browserDuration > 0 && isFinite(browserDuration)) {
+          duration.value = browserDuration
+        }
       })
       audio.value.addEventListener('ended', () => {
         isPlaying.value = false
@@ -45,8 +50,15 @@ export const usePlayerStore = defineStore('player', () => {
     if (segments.length === 0) return
 
     currentSegment.value = segments[0]
-    el.src = getAudioStreamUrl(segments[0].id, 'mp3')
+    el.src = getAudioStreamUrl(segments[0].id)
     el.volume = volume.value
+
+    // Set duration from segment metadata so the progress bar works immediately,
+    // even before the browser parses the audio stream headers.
+    if (segments[0].end_time_ms != null) {
+      duration.value = segments[0].end_time_ms - segments[0].start_time_ms
+    }
+
     await el.play()
 
     updateMediaSession()
