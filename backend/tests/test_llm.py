@@ -103,7 +103,7 @@ class TestMetadataExtraction:
             assert f"Mood: {mood}" in canonical
 
     def test_valid_era_values(self):
-        valid_eras = ["文艺复兴", "巴洛克", "古典", "浪漫", "民族主义", "印象主义", "现代", "后现代", "当代"]
+        valid_eras = ["文艺复兴", "巴洛克", "古典", "浪漫", "民族乐派", "印象主义", "现代", "后现代", "当代"]
         for era in valid_eras:
             metadata = {"composer": "Test", "work_title": "Test", "era": era}
             canonical = build_canonical_string(metadata)

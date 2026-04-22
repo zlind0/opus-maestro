@@ -75,7 +75,7 @@ const resultType = ref('')
 const searching = ref(false)
 const searched = ref(false)
 
-const eraOptions = ['文艺复兴', '巴洛克', '古典', '浪漫', '民族主义', '印象主义', '现代', '后现代', '当代']
+const eraOptions = ['文艺复兴', '巴洛克', '古典', '浪漫', '民族乐派', '印象主义', '现代', '后现代', '当代']
 const typeOptions = ['交响曲', '协奏曲', '奏鸣曲', '室内乐', '歌剧', '合唱', '独奏曲', '序曲', '变奏曲', '组曲']
 
 async function doSearch() {

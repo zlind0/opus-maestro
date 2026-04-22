@@ -2,6 +2,8 @@
 
 import json
 import logging
+import re
+import asyncio
 from typing import Optional
 
 import httpx
@@ -11,6 +13,51 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Validation rules
+ALLOWED_ERAS = ['文艺复兴', '巴洛克', '古典', '浪漫', '民族乐派', '印象主义', '现代', '后现代', '当代']
+
+
+def _contains_chinese(s: str) -> bool:
+    if not s or not isinstance(s, str):
+        return False
+    return bool(re.search(r"[\u4e00-\u9fff]", s))
+
+
+def _validate_metadata_item(metadata: dict) -> bool:
+    """Return True if metadata satisfies basic validation rules.
+
+    Rules enforced:
+    - If `era` is provided and not null, it must be one of `ALLOWED_ERAS`.
+    - `work_title` or `movement_title` should contain at least one Chinese character when provided.
+    """
+    if not isinstance(metadata, dict):
+        return False
+
+    era = metadata.get("era")
+    if era is not None:
+        try:
+            era_str = str(era).strip()
+        except Exception:
+            return False
+        if era_str and era_str not in ALLOWED_ERAS:
+            logger.debug(f"Invalid era: {era_str}")
+            return False
+
+    # Prefer movement_title to be Chinese, fall back to work_title when movement missing
+    mv_title = metadata.get("movement_title")
+    wk_title = metadata.get("work_title")
+    # If either present, at least one should contain Chinese characters
+    if mv_title:
+        if not _contains_chinese(mv_title):
+            logger.debug(f"Movement title lacks Chinese characters: {mv_title}")
+            return False
+    elif wk_title:
+        if not _contains_chinese(wk_title):
+            logger.debug(f"Work title lacks Chinese characters: {wk_title}")
+            return False
+
+    return True
 
 METADATA_EXTRACTION_SYSTEM_PROMPT = """You are a classical music metadata expert. Given an audio file's existing tags and file path information, extract structured metadata about the musical work.
 
@@ -22,7 +69,7 @@ You MUST respond with valid JSON only, no other text. Use the following schema:
   "key": "调号 (e.g. G小调, D大调)",
   "catalog_number": "作品编号 (e.g. K. 550, Op. 67, BWV 232)",
   "work_type": "作品类型(使用{language}, e.g. 交响曲, 协奏曲, 奏鸣曲, 室内乐, 歌剧, 合唱, 独奏曲)",
-  "era": "创作年代(使用{language}, ['文艺复兴', '巴洛克', '古典', '浪漫', '民族主义', '印象主义', '现代', '后现代', '当代']中选择一个最合适的，不要脱离这个范围)",
+  "era": "创作年代(使用{language}, ['文艺复兴', '巴洛克', '古典', '浪漫', '民族乐派', '印象主义', '现代', '后现代', '当代']中选择一个最合适的，不要脱离这个范围)",
   "movement_number": "乐章编号 (如果不清楚，使用null)",
   "movement_title": "乐章标题，尽量要使用中文",
   "mood": "情绪 (喜悦的/忧郁的/激动的/平静的/神秘的/庄严的/顽皮的/愤怒的/惊恐的)",
@@ -57,7 +104,7 @@ You MUST respond with a JSON ARRAY only, no other text. The array must contain o
   "key": "调号 (e.g. G小调, D大调)",
   "catalog_number": "作品编号 (e.g. K. 550, Op. 67, BWV 232)",
   "work_type": "作品类型(使用{language}, e.g. 交响曲, 协奏曲, 奏鸣曲, 室内乐, 歌剧, 合唱, 独奏曲)",
-  "era": "创作年代(使用{language}, ['文艺复兴', '巴洛克', '古典', '浪漫', '民族主义', '印象主义', '现代', '后现代', '当代']中选择一个最合适的，不要脱离这个范围)",
+  "era": "创作年代(使用{language}, ['文艺复兴', '巴洛克', '古典', '浪漫', '民族乐派', '印象主义', '现代', '后现代', '当代']中选择一个最合适的，不要脱离这个范围)",
   "movement_number": "乐章编号 (如果不清楚，使用null)",
   "movement_title": "乐章标题，尽量要使用中文",
   "mood": "情绪 (喜悦的/忧郁的/激动的/平静的/神秘的/庄严的/顽皮的/愤怒的/惊恐的)",
@@ -160,16 +207,37 @@ async def call_llm(system_prompt: str, user_prompt: str, response_json: bool = T
 async def extract_metadata(file_path: str, tags: dict, language: str = "简体中文") -> Optional[dict]:
     """Extract structured metadata from audio file tags using LLM."""
     system, user = build_extraction_prompt(file_path, tags, language)
-    result = await call_llm(system, user)
-    if result is None:
-        return None
-    try:
-        if result.startswith("```json") and result.endswith("```"):
-            result = result[7:-3].strip()
-        return json.loads(result)
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse LLM response as JSON: {result}")
-        return None
+    max_retries = getattr(settings, "llm_max_retries", 3) or 3
+    for attempt in range(1, max_retries + 1):
+        result = await call_llm(system, user)
+        if result is None:
+            logger.debug(f"LLM returned no result (attempt {attempt}/{max_retries})")
+            if attempt < max_retries:
+                await asyncio.sleep(attempt)
+                continue
+            return None
+        try:
+            s = result.strip()
+            if s.startswith("```json") and s.endswith("```"):
+                s = s[7:-3].strip()
+            parsed = json.loads(s)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse LLM response as JSON (attempt {attempt}): {result}")
+            if attempt < max_retries:
+                await asyncio.sleep(attempt)
+                continue
+            return None
+
+        # Validate parsed metadata; if invalid, retry up to max_retries
+        if _validate_metadata_item(parsed):
+            return parsed
+        else:
+            logger.info(f"LLM metadata validation failed (attempt {attempt}/{max_retries}): {file_path}")
+            if attempt < max_retries:
+                await asyncio.sleep(attempt)
+                continue
+            # Give up and return None so caller falls back to tags
+            return None
 
 
 def build_extraction_prompt_batch(
@@ -203,33 +271,69 @@ async def extract_metadata_batch(
         return [result]
 
     system, user = build_extraction_prompt_batch(file_paths, tags_list, language)
-    result_str = await call_llm(system, user)
-    if result_str is None:
-        return [None] * n
-
-    try:
-        s = result_str.strip()
-        if s.startswith("```json"):
-            s = s[7:]
-        elif s.startswith("```"):
-            s = s[3:]
-        if s.endswith("```"):
-            s = s[:-3]
-        s = s.strip()
-        parsed = json.loads(s)
-        if not isinstance(parsed, list):
-            logger.error(f"Batch LLM response is not a JSON array: {result_str[:200]}")
+    max_retries = getattr(settings, "llm_max_retries", 3) or 3
+    for attempt in range(1, max_retries + 1):
+        result_str = await call_llm(system, user)
+        if result_str is None:
+            logger.debug(f"Batch LLM returned no result (attempt {attempt}/{max_retries})")
+            if attempt < max_retries:
+                await asyncio.sleep(attempt)
+                continue
             return [None] * n
-        results: list[Optional[dict]] = []
-        for i in range(n):
-            if i < len(parsed) and isinstance(parsed[i], dict):
-                results.append(parsed[i])
+
+        try:
+            s = result_str.strip()
+            if s.startswith("```json"):
+                s = s[7:]
+            elif s.startswith("```"):
+                s = s[3:]
+            if s.endswith("```"):
+                s = s[:-3]
+            s = s.strip()
+            parsed = json.loads(s)
+            if not isinstance(parsed, list):
+                logger.error(f"Batch LLM response is not a JSON array (attempt {attempt}): {result_str[:200]}")
+                if attempt < max_retries:
+                    await asyncio.sleep(attempt)
+                    continue
+                return [None] * n
+
+            # Validate each parsed item. If any item fails validation, retry.
+            valid_flags = []
+            for item in parsed:
+                if isinstance(item, dict) and _validate_metadata_item(item):
+                    valid_flags.append(True)
+                else:
+                    valid_flags.append(False)
+
+            if all(valid_flags) and len(parsed) >= n:
+                # Normalize to exactly n items
+                results: list[Optional[dict]] = []
+                for i in range(n):
+                    if i < len(parsed) and isinstance(parsed[i], dict):
+                        results.append(parsed[i])
+                    else:
+                        results.append(None)
+                return results
             else:
-                results.append(None)
-        return results
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse batch LLM response as JSON: {result_str[:200]}")
-        return [None] * n
+                logger.info(f"Batch metadata validation failed (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    await asyncio.sleep(attempt)
+                    continue
+                # On final attempt, return parsed results but replace invalid items with None
+                results = []
+                for i in range(n):
+                    if i < len(parsed) and isinstance(parsed[i], dict) and _validate_metadata_item(parsed[i]):
+                        results.append(parsed[i])
+                    else:
+                        results.append(None)
+                return results
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse batch LLM response as JSON (attempt {attempt}): {result_str[:200]}")
+            if attempt < max_retries:
+                await asyncio.sleep(attempt)
+                continue
+            return [None] * n
 
 
 async def get_embedding(text: str) -> Optional[list[float]]:
